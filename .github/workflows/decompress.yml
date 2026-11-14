@@ -1,0 +1,97 @@
+name: Decompress filter streams
+
+on:
+  workflow_dispatch:
+
+jobs:
+  decompress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and install pyooz
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install .
+
+      - name: Show the API
+        continue-on-error: true
+        run: |
+          python -c "import ooz; print(dir(ooz)); help(ooz)"
+
+      - name: Unpack streams
+        run: |
+          test -f streams.zip || { echo "streams.zip missing in repo root"; exit 1; }
+          mkdir -p in out
+          unzip -o streams.zip -d in
+          cat in/manifest.txt
+
+      - name: Decompress
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          import ooz
+
+          man = {}
+          for line in open("in/manifest.txt"):
+              m = re.match(r"(\S+) comp=(\d+) dec=(\d+)", line)
+              if m:
+                  man[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+
+          # find a decompress function by name
+          cands = [n for n in dir(ooz) if "decomp" in n.lower()]
+          print("candidate functions:", cands)
+
+          def attempt(data, dec):
+              for n in cands:
+                  f = getattr(ooz, n)
+                  for args in ((data, dec), (data, len(data), dec), (data,)):
+                      try:
+                          r = f(*args)
+                      except Exception as e:
+                          continue
+                      if isinstance(r, (bytes, bytearray, memoryview)) and len(r) == dec:
+                          return n, args[1:], bytes(r)
+              return None
+
+          ok = 0
+          for fn, (comp, dec) in man.items():
+              data = open("in/" + fn, "rb").read()
+              base = fn.split(".")[0]
+              if fn.endswith(".raw"):
+                  open(f"out/{base}.trlgt", "wb").write(data)
+                  print(base, "raw copy", len(data))
+                  ok += 1
+                  continue
+              res = attempt(data, dec)
+              if res is None:
+                  print(base, "FAILED (no function/signature matched)")
+                  continue
+              n, a, out = res
+              open(f"out/{base}.trlgt", "wb").write(out)
+              print(base, "OK via", n, a, len(out))
+              ok += 1
+
+          print("decoded", ok, "of", len(man))
+          sys.exit(0 if ok == len(man) else 1)
+          PY
+
+      - name: Dump kawaii and sepia
+        if: always()
+        run: |
+          for f in kawaii sepia fisheyeLens; do
+            echo "=== $f ==="
+            test -f out/$f.trlgt && xxd out/$f.trlgt
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: decoded-trlgt
+          path: out/
